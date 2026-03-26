@@ -1,0 +1,36 @@
+# coldshot — outreach strategy config
+# Copy to coldshot.toml and customize for your product.
+#
+#   cp coldshot.example.toml coldshot.toml
+
+[sender]
+name = "Your Name"
+
+[product]
+name = "Acme"
+pitch = "a developer tool that does X for Y teams"
+qualifier = "Only say YES if you have high confidence that their product would benefit from X."
+
+[targeting]
+# Criteria the AI uses to pick the right person at a company.
+scoring = [
+    "Target the most senior technical person who still makes hands-on decisions.",
+    "Skip pure executives whose LinkedIn is all strategy and ROI — find who actually builds.",
+    "Go down the org chart until you find a Director+ who codes.",
+    "Prefer minimal LinkedIn activity over polished thought leaders. Builders are too busy building to post.",
+]
+
+[research]
+# Pain point areas to investigate when researching a company.
+focus = [
+    "Challenges with monitoring and debugging in production",
+    "Difficulties scaling their core product",
+    "Cost optimization concerns",
+    "Tooling gaps across engineering teams",
+]
+
+[discovery]
+# Sumble API filters for finding companies.
+technologies = ["React", "Node.js", "Python"]
+min_employees = 50
+max_employees = 500

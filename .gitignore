@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.env
+.venv/
+client_secret*.json
+token.json
+data/*.db
+data/*.csv
+coldshot.toml
+docs/
