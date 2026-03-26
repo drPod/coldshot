@@ -5,6 +5,7 @@
 
 [sender]
 name = "Your Name"
+closing = "Open to a quick chat?"    # CTA before your name in the email
 
 [product]
 name = "Acme"

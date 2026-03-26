@@ -544,6 +544,53 @@ class Recorder:
             except sqlite3.Error:
                 pass
 
+    def mark_target_drafted(self, target_id: int) -> None:
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "UPDATE targets SET status = 'drafted' WHERE id = ?",
+                    (target_id,),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                pass
+
+    def get_stats(self) -> dict[str, int]:
+        """Return pipeline statistics."""
+        with self._lock:
+            cur = self._conn.cursor()
+
+            cur.execute("SELECT COUNT(*) FROM discovered_orgs")
+            orgs_discovered = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM discovered_orgs WHERE verdict = 'YES'")
+            orgs_qualified = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM targets")
+            targets_found = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM targets WHERE status = 'emailed'")
+            emails_sent = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM targets WHERE status = 'skipped'")
+            targets_skipped = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM targets WHERE status = 'drafted'")
+            targets_drafted = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM targets WHERE status = 'pending'")
+            targets_pending = cur.fetchone()[0]
+
+            return {
+                "orgs_discovered": orgs_discovered,
+                "orgs_qualified": orgs_qualified,
+                "targets_found": targets_found,
+                "emails_sent": emails_sent,
+                "targets_skipped": targets_skipped,
+                "targets_drafted": targets_drafted,
+                "targets_pending": targets_pending,
+            }
+
     def is_org_known(self, org_domain: str) -> bool:
         with self._lock:
             cur = self._conn.execute(

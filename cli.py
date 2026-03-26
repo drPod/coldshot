@@ -9,9 +9,11 @@ panel while waiting, then pauses it for the interactive email workflow.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -100,29 +102,34 @@ def _render_panel(state: PipelineState) -> Panel:
 
 
 def _show_target(ready: ReadyTarget) -> None:
-    """Display the target context box."""
+    """Display the target context box with Rich formatting."""
     width = 60
-    print()
-    print("=" * width)
-    print(f"{ready.org_name} ({ready.org_domain})", end="")
+    c = _console
+    c.print()
+    c.print("=" * width, style="bold blue")
+    header = f"{ready.org_name} ({ready.org_domain})"
     if ready.employee_count:
-        print(f" · {ready.employee_count} employees")
-    else:
-        print()
-    print(f"{ready.person_name} — {ready.person_title or 'unknown title'}")
-    print("-" * width)
-    print(f"Qualification: {ready.qualification}")
-    print(f"Why this person: {ready.targeting_reason}")
-    print("-" * width)
-    print(f"Pain points:")
+        header += f" · {ready.employee_count} employees"
+    c.print(header, style="bold")
+    c.print(f"{ready.person_name} — {ready.person_title or 'unknown title'}", style="bold cyan")
+    c.print("-" * width, style="dim")
+    c.print("Qualification:", style="bold", end=" ")
+    c.print(ready.qualification, style="green")
+    if ready.targeting_reason:
+        c.print("Why this person:", style="bold", end=" ")
+        c.print(ready.targeting_reason)
+    c.print("-" * width, style="dim")
+    c.print("Pain points:", style="bold")
     for line in ready.pain_points.strip().splitlines():
-        print(f"  {line.strip()}")
-    print("-" * width)
-    print(f"Suggested subject: {ready.suggested_subject}")
-    print("-" * width)
-    print(f"Find email: {ready.sumble_url}")
-    print("=" * width)
-    print()
+        c.print(f"  {line.strip()}")
+    c.print("-" * width, style="dim")
+    c.print("Suggested subject:", style="bold", end=" ")
+    c.print(ready.suggested_subject)
+    c.print("-" * width, style="dim")
+    c.print("Find email:", style="bold", end=" ")
+    c.print(ready.sumble_url, style="underline")
+    c.print("=" * width, style="bold blue")
+    c.print()
 
 
 def _open_editor(ready: ReadyTarget) -> str | None:
@@ -148,7 +155,7 @@ def _open_editor(ready: ReadyTarget) -> str | None:
         f"",
         f"",
         f"",
-        f"Open to a 15-min call?",
+        f"{config.load()['sender']['closing']}",
         f"{config.load()['sender']['name']}",
     ]
 
@@ -463,9 +470,12 @@ def _find_contact_and_queue(
 # ── Producer (background thread) ─────────────────────────────────────
 
 
-def _wait_for_buffer(state: PipelineState, stop_event: threading.Event) -> bool:
+def _wait_for_buffer(state: PipelineState, stop_event: threading.Event, pause_event: threading.Event | None = None) -> bool:
     """Block until the target buffer has room. Returns False if stopped."""
     while not stop_event.is_set():
+        if pause_event and pause_event.is_set():
+            stop_event.wait(timeout=2.0)
+            continue
         snap = state.snapshot()
         if len(snap["ready"]) + len(snap["in_progress"]) < TARGET_BUFFER:
             return True
@@ -478,6 +488,7 @@ def _producer(
     stop_event: threading.Event,
     recorder: Recorder,
     state: PipelineState,
+    pause_event: threading.Event,
 ) -> None:
     """Discovery thread: find orgs, dispatch contact+research workers."""
     client = SumbleClient(recorder=recorder)
@@ -540,7 +551,7 @@ def _producer(
                 f"Researching {len(unresearched)} saved targets..."
             )
             for target in unresearched:
-                if not _wait_for_buffer(state, stop_event):
+                if not _wait_for_buffer(state, stop_event, pause_event):
                     break
                 qual_reasons[target["org_domain"]] = target["qualification"] or ""
                 state.add_in_progress(target["org_name"])
@@ -557,7 +568,7 @@ def _producer(
                 f"Resuming {len(resumable)} qualified orgs..."
             )
             for row in resumable:
-                if not _wait_for_buffer(state, stop_event):
+                if not _wait_for_buffer(state, stop_event, pause_event):
                     break
                 org = QualifiedOrg(
                     name=row["org_name"],
@@ -575,7 +586,7 @@ def _producer(
 
         # Phase 3: discover new orgs.
         while not stop_event.is_set():
-            if not _wait_for_buffer(state, stop_event):
+            if not _wait_for_buffer(state, stop_event, pause_event):
                 break
 
             skip_domains = recorder.get_known_domains()
@@ -611,16 +622,32 @@ def _producer(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Cold sales pipeline")
+    parser.add_argument("--init", action="store_true", help="Create coldshot.toml interactively")
+    parser.add_argument("--max", type=int, default=None, metavar="N", help="Stop after presenting N targets")
+    args = parser.parse_args()
+
+    if args.init:
+        config.init_interactive()
+        return
+
+    errors = config.validate()
+    if errors:
+        for e in errors:
+            print(f"  config error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     recorder = Recorder()
     recorder.start_session(pipeline_stage="pipeline")
     state = PipelineState()
 
     target_queue: queue.Queue[ReadyTarget | None] = queue.Queue(maxsize=5)
     stop_event = threading.Event()
+    pause_event = threading.Event()
 
     producer_thread = threading.Thread(
         target=_producer,
-        args=(target_queue, stop_event, recorder, state),
+        args=(target_queue, stop_event, recorder, state, pause_event),
         daemon=True,
     )
     producer_thread.start()
@@ -631,6 +658,8 @@ def main() -> None:
         refresh_per_second=4,
     )
     live.start()
+
+    targets_shown = 0
 
     try:
         while True:
@@ -650,6 +679,7 @@ def main() -> None:
             if ready is None:
                 break
 
+            targets_shown += 1
             state.pop_ready()
 
             # Pause Live for interactive section
@@ -657,21 +687,65 @@ def main() -> None:
 
             _show_target(ready)
 
-            try:
-                email = input(
-                    "Paste email (or 'q' to stop, Enter to skip): "
-                ).strip()
-            except EOFError:
-                email = ""
+            # Interactive command loop
+            while True:
+                try:
+                    raw = input(
+                        "Paste email (or /skip, /stats, /pause, /resume, d=draft, q=quit): "
+                    ).strip()
+                except EOFError:
+                    raw = ""
+
+                if raw == "/stats":
+                    stats = recorder.get_stats()
+                    _console.print("\n--- Pipeline Stats ---", style="bold")
+                    _console.print(f"  Orgs discovered:  {stats['orgs_discovered']}")
+                    _console.print(f"  Orgs qualified:   {stats['orgs_qualified']}")
+                    _console.print(f"  Targets found:    {stats['targets_found']}")
+                    _console.print(f"  Emails sent:      {stats['emails_sent']}", style="green")
+                    _console.print(f"  Skipped:          {stats['targets_skipped']}")
+                    _console.print(f"  Drafted:          {stats['targets_drafted']}", style="yellow")
+                    _console.print(f"  Pending:          {stats['targets_pending']}\n")
+                    continue
+
+                if raw == "/pause":
+                    pause_event.set()
+                    _console.print("  Pipeline paused.", style="yellow")
+                    continue
+
+                if raw == "/resume":
+                    pause_event.clear()
+                    _console.print("  Pipeline resumed.", style="green")
+                    continue
+
+                # All other inputs break out of the command loop
+                break
+
+            email = raw
 
             if email.lower() == "q":
                 print("Stopping — remaining targets saved for next run.")
                 stop_event.set()
                 break
 
-            if not email:
+            if email == "/skip" or not email:
                 recorder.mark_target_skipped(ready.target_id)
                 print("  Skipped. Moving on...\n")
+                if args.max and targets_shown >= args.max:
+                    print(f"Reached --max {args.max} targets. Stopping.")
+                    stop_event.set()
+                    break
+                live.start()
+                live.update(_render_panel(state))
+                continue
+
+            if email.lower() == "d":
+                recorder.mark_target_drafted(ready.target_id)
+                _console.print("  Saved as draft for later.\n", style="yellow")
+                if args.max and targets_shown >= args.max:
+                    print(f"Reached --max {args.max} targets. Stopping.")
+                    stop_event.set()
+                    break
                 live.start()
                 live.update(_render_panel(state))
                 continue
@@ -695,6 +769,18 @@ def main() -> None:
                 live.update(_render_panel(state))
                 continue
 
+            # Confirmation before sending
+            try:
+                confirm = input(f"Send to {email}? [Y/n]: ").strip().lower()
+            except EOFError:
+                confirm = "y"
+            if confirm == "n":
+                recorder.mark_target_skipped(ready.target_id)
+                print("  Cancelled.\n")
+                live.start()
+                live.update(_render_panel(state))
+                continue
+
             print(f"  Sending to {email}...")
             msg_id = send_email(
                 to=email,
@@ -711,6 +797,11 @@ def main() -> None:
             if outreach_id:
                 recorder.mark_target_emailed(ready.target_id, outreach_id)
             print(f"  Sent (message {msg_id})\n")
+
+            if args.max and targets_shown >= args.max:
+                print(f"Reached --max {args.max} targets. Stopping.")
+                stop_event.set()
+                break
 
             live.start()
             live.update(_render_panel(state))
