@@ -92,6 +92,8 @@ max_employees = 500
 
 See [`coldshot.example.toml`](coldshot.example.toml) for the full template with comments.
 
+You can also run `python cli.py --init` to create `coldshot.toml` interactively.
+
 ### Gmail OAuth
 
 coldshot sends emails through the Gmail API. To set this up:
@@ -103,6 +105,30 @@ coldshot sends emails through the Gmail API. To set this up:
 5. On first run, a browser window opens to authorize — the token is cached in `token.json`
 
 Both `client_secret*.json` and `token.json` are gitignored.
+
+## Commands
+
+When a target is presented, the prompt accepts these inputs:
+
+| Input | Action |
+|-------|--------|
+| **Enter** | Try another person at the same company |
+| *email address* | Proceed to subject line and editor |
+| `/skip` | Skip the entire company |
+| `/stats` | Show pipeline statistics (discovered, qualified, sent, etc.) |
+| `/pause` | Pause background discovery — stops new API calls |
+| `/resume` | Resume background discovery |
+| `d` | Save target as draft for later |
+| `q` | Quit — unseen targets are saved for next run |
+
+After writing an email in your editor, you'll be asked to confirm before sending.
+
+### CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--init` | Create `coldshot.toml` interactively |
+| `--max N` | Stop after presenting N targets |
 
 ## Architecture
 

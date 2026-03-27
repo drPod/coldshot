@@ -367,6 +367,7 @@ def _find_contact_and_queue(
     recorder: Recorder,
     state: PipelineState,
     stop_event: threading.Event,
+    exclude_person_ids: set[int] | None = None,
 ) -> None:
     """Find person, record target, then research pain points and queue.
 
@@ -383,6 +384,7 @@ def _find_contact_and_queue(
             recorder=recorder,
             on_status=state.add_activity,
             stop_event=stop_event,
+            exclude_person_ids=exclude_person_ids,
         )
 
         if stop_event.is_set() and not contacts.target:
@@ -691,7 +693,7 @@ def main() -> None:
             while True:
                 try:
                     raw = input(
-                        "Paste email (or /skip, /stats, /pause, /resume, d=draft, q=quit): "
+                        "Email (Enter=try another, /skip=skip company, d=draft, /stats, /pause, /resume, q=quit): "
                     ).strip()
                 except EOFError:
                     raw = ""
@@ -728,9 +730,37 @@ def main() -> None:
                 stop_event.set()
                 break
 
-            if email == "/skip" or not email:
+            if email == "/skip":
                 recorder.mark_target_skipped(ready.target_id)
-                print("  Skipped. Moving on...\n")
+                print("  Skipped company. Moving on...\n")
+                if args.max and targets_shown >= args.max:
+                    print(f"Reached --max {args.max} targets. Stopping.")
+                    stop_event.set()
+                    break
+                live.start()
+                live.update(_render_panel(state))
+                continue
+
+            if not email:
+                # Try the next person at this company
+                recorder.mark_target_skipped(ready.target_id)
+                excluded = recorder.get_tried_person_ids(ready.org_domain)
+                org = QualifiedOrg(
+                    name=ready.org_name,
+                    domain=ready.org_domain,
+                    employee_count=ready.employee_count,
+                )
+                state.add_in_progress(ready.org_name)
+                threading.Thread(
+                    target=_find_contact_and_queue,
+                    args=(
+                        org, ready.qualification, target_queue,
+                        recorder, state, stop_event,
+                    ),
+                    kwargs={"exclude_person_ids": excluded},
+                    daemon=True,
+                ).start()
+                print("  Looking for another contact...\n")
                 if args.max and targets_shown >= args.max:
                     print(f"Reached --max {args.max} targets. Stopping.")
                     stop_event.set()

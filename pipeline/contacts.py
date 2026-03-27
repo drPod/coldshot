@@ -97,6 +97,7 @@ def surface_contacts(
     recorder: Recorder | None = None,
     on_status: Callable[[str], None] | None = None,
     stop_event: threading.Event | None = None,
+    exclude_person_ids: set[int] | None = None,
 ) -> ContactResult:
     """Walk down the org chart level by level, evaluating each person
     with an LLM until finding the right cold outreach target."""
@@ -135,6 +136,9 @@ def surface_contacts(
             for person in resp.people:
                 if stop_event is not None and stop_event.is_set():
                     break
+
+                if exclude_person_ids and person.id in exclude_person_ids:
+                    continue
 
                 if person.id in eval_cache:
                     is_target, reasoning = eval_cache[person.id]

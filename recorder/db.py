@@ -591,6 +591,16 @@ class Recorder:
                 "targets_pending": targets_pending,
             }
 
+    def get_tried_person_ids(self, org_domain: str) -> set[int]:
+        """Person IDs from targets at this org (any status)."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT DISTINCT person_id FROM targets "
+                "WHERE org_domain = ? AND person_id IS NOT NULL",
+                (org_domain,),
+            )
+            return {row[0] for row in cur.fetchall()}
+
     def is_org_known(self, org_domain: str) -> bool:
         with self._lock:
             cur = self._conn.execute(
