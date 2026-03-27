@@ -123,3 +123,4 @@ class ReadyTarget:
     target_id: int
     pain_points: str
     suggested_subject: str
+    email: str = ""

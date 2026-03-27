@@ -205,7 +205,7 @@ def _research_pain_points(
     t0 = time.monotonic()
     response = llm.messages.create(
         model="claude-opus-4-6",
-        max_tokens=500,
+        max_tokens=1500,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
     )
@@ -348,6 +348,7 @@ def _research_and_queue_target(
             target_id=target["id"],
             pain_points=pain_points,
             suggested_subject=suggested_subject,
+            email=target.get("email") or "",
         )
         summary = (
             f"{org.name} — {target['person_name']}, "
@@ -535,6 +536,7 @@ def _producer(
                     target_id=target["id"],
                     pain_points=target["pain_points"],
                     suggested_subject=target["suggested_subject"],
+                    email=target.get("email") or "",
                 )
                 summary = (
                     f"{target['org_name']} — {target['person_name']}, "
@@ -627,6 +629,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Cold sales pipeline")
     parser.add_argument("--init", action="store_true", help="Create coldshot.toml interactively")
     parser.add_argument("--max", type=int, default=None, metavar="N", help="Stop after presenting N targets")
+    parser.add_argument("--draft", action="store_true", help="Compose emails without sending")
     args = parser.parse_args()
 
     if args.init:
@@ -662,24 +665,29 @@ def main() -> None:
     live.start()
 
     targets_shown = 0
+    retry_ready: ReadyTarget | None = None
 
     try:
         while True:
-            # Poll queue with timeout so Live keeps refreshing
-            try:
-                ready = target_queue.get(timeout=0.25)
-            except queue.Empty:
-                live.update(_render_panel(state))
-                if state.stopped and target_queue.empty():
-                    try:
-                        ready = target_queue.get(timeout=1.0)
-                    except queue.Empty:
-                        break
-                else:
-                    continue
+            if retry_ready is not None:
+                ready = retry_ready
+                retry_ready = None
+            else:
+                # Poll queue with timeout so Live keeps refreshing
+                try:
+                    ready = target_queue.get(timeout=0.25)
+                except queue.Empty:
+                    live.update(_render_panel(state))
+                    if state.stopped and target_queue.empty():
+                        try:
+                            ready = target_queue.get(timeout=1.0)
+                        except queue.Empty:
+                            break
+                    else:
+                        continue
 
-            if ready is None:
-                break
+                if ready is None:
+                    break
 
             targets_shown += 1
             state.pop_ready()
@@ -691,10 +699,12 @@ def main() -> None:
 
             # Interactive command loop
             while True:
+                if ready.email:
+                    prompt = f"Email [{ready.email}] (Enter=use saved, /skip, d=draft, /stats, q=quit): "
+                else:
+                    prompt = "Email (Enter=try another, /skip=skip company, d=draft, /stats, /pause, /resume, q=quit): "
                 try:
-                    raw = input(
-                        "Email (Enter=try another, /skip=skip company, d=draft, /stats, /pause, /resume, q=quit): "
-                    ).strip()
+                    raw = input(prompt).strip()
                 except EOFError:
                     raw = ""
 
@@ -741,6 +751,10 @@ def main() -> None:
                 live.update(_render_panel(state))
                 continue
 
+            if not email and ready.email:
+                # Enter pressed with a saved email — use it
+                email = ready.email
+
             if not email:
                 # Try the next person at this company
                 recorder.mark_target_skipped(ready.target_id)
@@ -751,22 +765,43 @@ def main() -> None:
                     employee_count=ready.employee_count,
                 )
                 state.add_in_progress(ready.org_name)
-                threading.Thread(
+                retry_q: queue.Queue[ReadyTarget | None] = queue.Queue(maxsize=1)
+                retry_thread = threading.Thread(
                     target=_find_contact_and_queue,
                     args=(
-                        org, ready.qualification, target_queue,
+                        org, ready.qualification, retry_q,
                         recorder, state, stop_event,
                     ),
                     kwargs={"exclude_person_ids": excluded},
                     daemon=True,
-                ).start()
+                )
+                retry_thread.start()
                 print("  Looking for another contact...\n")
                 if args.max and targets_shown >= args.max:
                     print(f"Reached --max {args.max} targets. Stopping.")
                     stop_event.set()
                     break
+                # Wait for the same-company result while keeping Live updated
                 live.start()
-                live.update(_render_panel(state))
+                retry_result = None
+                while retry_thread.is_alive():
+                    try:
+                        retry_result = retry_q.get(timeout=0.25)
+                        break
+                    except queue.Empty:
+                        live.update(_render_panel(state))
+                if retry_result is None:
+                    try:
+                        retry_result = retry_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                if retry_result is not None:
+                    retry_ready = retry_result
+                else:
+                    live.stop()
+                    print("  No other contacts found at this company.\n")
+                    live.start()
+                    live.update(_render_panel(state))
                 continue
 
             if email.lower() == "d":
@@ -779,6 +814,9 @@ def main() -> None:
                 live.start()
                 live.update(_render_panel(state))
                 continue
+
+            # Persist email immediately so it survives a quit/crash
+            recorder.save_target_email(ready.target_id, email)
 
             try:
                 subject = input(
@@ -799,9 +837,10 @@ def main() -> None:
                 live.update(_render_panel(state))
                 continue
 
-            # Confirmation before sending
+            # Confirmation before sending / saving draft
+            action = "Save draft for" if args.draft else "Send to"
             try:
-                confirm = input(f"Send to {email}? [Y/n]: ").strip().lower()
+                confirm = input(f"{action} {email}? [Y/n]: ").strip().lower()
             except EOFError:
                 confirm = "y"
             if confirm == "n":
@@ -811,22 +850,38 @@ def main() -> None:
                 live.update(_render_panel(state))
                 continue
 
-            print(f"  Sending to {email}...")
-            msg_id = send_email(
-                to=email,
-                subject=subject,
-                body=body,
-                recorder=recorder,
-                org_name=ready.org_name,
-                org_domain=ready.org_domain,
-                person_name=ready.person_name,
-                person_title=ready.person_title,
-                person_id=ready.person_id,
-            )
-            outreach_id = recorder.get_outreach_id_by_gmail_msg(msg_id)
-            if outreach_id:
-                recorder.mark_target_emailed(ready.target_id, outreach_id)
-            print(f"  Sent (message {msg_id})\n")
+            if args.draft:
+                print(f"  Saving draft for {email}...")
+                outreach_id = recorder.record_outreach(
+                    org_name=ready.org_name,
+                    org_domain=ready.org_domain,
+                    person_name=ready.person_name,
+                    person_title=ready.person_title,
+                    person_id=ready.person_id,
+                    email=email,
+                    subject=subject,
+                    body=body,
+                    status="draft",
+                )
+                recorder.mark_target_drafted(ready.target_id, outreach_id)
+                print("  Draft saved.\n")
+            else:
+                print(f"  Sending to {email}...")
+                msg_id = send_email(
+                    to=email,
+                    subject=subject,
+                    body=body,
+                    recorder=recorder,
+                    org_name=ready.org_name,
+                    org_domain=ready.org_domain,
+                    person_name=ready.person_name,
+                    person_title=ready.person_title,
+                    person_id=ready.person_id,
+                )
+                outreach_id = recorder.get_outreach_id_by_gmail_msg(msg_id)
+                if outreach_id:
+                    recorder.mark_target_emailed(ready.target_id, outreach_id)
+                print(f"  Sent (message {msg_id})\n")
 
             if args.max and targets_shown >= args.max:
                 print(f"Reached --max {args.max} targets. Stopping.")

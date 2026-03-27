@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS targets (
     status              TEXT NOT NULL DEFAULT 'pending',
     outreach_id         INTEGER REFERENCES outreach(id),
     pain_points         TEXT,
-    suggested_subject   TEXT
+    suggested_subject   TEXT,
+    email               TEXT
 );
 
 CREATE TABLE IF NOT EXISTS discovered_orgs (
@@ -156,7 +157,7 @@ class Recorder:
 
     def _migrate(self) -> None:
         """Add columns that may be missing from older schemas."""
-        for col, typ in [("pain_points", "TEXT"), ("suggested_subject", "TEXT")]:
+        for col, typ in [("pain_points", "TEXT"), ("suggested_subject", "TEXT"), ("email", "TEXT")]:
             try:
                 self._conn.execute(f"ALTER TABLE targets ADD COLUMN {col} {typ}")
                 self._conn.commit()
@@ -279,14 +280,15 @@ class Recorder:
         subject: str,
         body: str,
         gmail_msg_id: str | None = None,
+        status: str = "sent",
     ) -> int:
         with self._lock:
             try:
                 cur = self._conn.execute(
                     "INSERT INTO outreach "
                     "(session_id, ts, org_name, org_domain, person_name, "
-                    "person_title, person_id, email, subject, body, gmail_msg_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "person_title, person_id, email, subject, body, gmail_msg_id, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         self._session_id or "",
                         _now(),
@@ -299,6 +301,7 @@ class Recorder:
                         subject,
                         body,
                         gmail_msg_id,
+                        status,
                     ),
                 )
                 self._conn.commit()
@@ -311,7 +314,7 @@ class Recorder:
                     "email": email,
                     "subject": subject,
                     "body": body,
-                    "status": "sent",
+                    "status": status,
                 })
                 return cur.lastrowid or 0
             except sqlite3.Error:
@@ -481,6 +484,17 @@ class Recorder:
             except sqlite3.Error:
                 pass
 
+    def save_target_email(self, target_id: int, email: str) -> None:
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "UPDATE targets SET email = ? WHERE id = ?",
+                    (email, target_id),
+                )
+                self._conn.commit()
+            except sqlite3.Error:
+                pass
+
     def get_person_eval_cache(self, org_domain: str) -> dict[int, tuple[bool, str]]:
         """Cached person evaluations for an org: {person_id: (is_target, reasoning)}."""
         with self._lock:
@@ -544,13 +558,21 @@ class Recorder:
             except sqlite3.Error:
                 pass
 
-    def mark_target_drafted(self, target_id: int) -> None:
+    def mark_target_drafted(
+        self, target_id: int, outreach_id: int | None = None
+    ) -> None:
         with self._lock:
             try:
-                self._conn.execute(
-                    "UPDATE targets SET status = 'drafted' WHERE id = ?",
-                    (target_id,),
-                )
+                if outreach_id is not None:
+                    self._conn.execute(
+                        "UPDATE targets SET status = 'drafted', outreach_id = ? WHERE id = ?",
+                        (outreach_id, target_id),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE targets SET status = 'drafted' WHERE id = ?",
+                        (target_id,),
+                    )
                 self._conn.commit()
             except sqlite3.Error:
                 pass
